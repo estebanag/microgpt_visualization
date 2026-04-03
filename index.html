@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MicroGPT</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #0f172a;
+      }
+      #plot {
+        width: 100vw;
+        height: 100vh;
+      }
+      .js-plotly-plot .plotly .modebar {
+        display: none;
+      }
+      input[type="range"][orient="vertical"] {
+        writing-mode: bt-lr;
+        -webkit-appearance: slider-vertical;
+        appearance: slider-vertical;
+      }
+    </style>
+  </head>
+  <body class="text-slate-200 relative">
+    <div
+      class="absolute top-8 left-1/2 -translate-x-1/2 z-20 pointer-events-none flex flex-col items-center"
+    >
+      <h1 class="text-2xl font-bold text-slate-100 mb-3 tracking-wide">
+        MicroGPT
+      </h1>
+      <div
+        id="context-label"
+        class="text-lg text-sky-400 font-mono bg-slate-800/90 px-5 py-2 rounded-full border border-slate-600 shadow-lg"
+      >
+        Context: "" &rarr; Predicting: "m"
+      </div>
+    </div>
+
+    <div id="plot" class="absolute inset-0 z-0"></div>
+
+    <div
+      class="absolute left-8 top-1/4 bottom-8 z-30 pointer-events-auto flex flex-col items-center gap-3"
+    >
+      <div
+        id="slider-label"
+        class="text-sky-400 font-semibold text-sm text-center bg-slate-800/90 px-3 py-2 rounded border border-slate-600 shadow-md"
+      >
+        Step: 0<br /><span class="text-slate-300">([BOS] &rarr; m)</span>
+      </div>
+      <input
+        type="range"
+        id="slider"
+        orient="vertical"
+        min="0"
+        value="0"
+        class="flex-grow cursor-pointer opacity-80 hover:opacity-100 transition-opacity"
+      />
+      <div
+        class="bg-slate-800/90 border border-slate-600 rounded shadow-lg px-3 py-2 flex flex-col items-stretch gap-2 w-full"
+      >
+        <button
+          id="play-pause"
+          class="bg-sky-600 hover:bg-sky-500 text-white px-3 py-1.5 rounded border border-sky-700 font-semibold text-sm transition-colors w-full"
+        >
+          Play
+        </button>
+        <button
+          id="toggle-all"
+          class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-1.5 rounded border border-slate-600 font-semibold text-sm transition-colors w-full"
+        >
+          Hide Vectors
+        </button>
+        <button
+          id="toggle-emb"
+          class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-1.5 rounded border border-slate-600 font-semibold text-sm transition-colors w-full"
+        >
+          Hide Token Embeddings
+        </button>
+        <button
+          id="toggle-unemb"
+          class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-1.5 rounded border border-slate-600 font-semibold text-sm transition-colors w-full"
+        >
+          Hide Target Unembeddings
+        </button>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const CFG = {
+          doc: "marty mcfly",
+          seeds: { emb: 1337, unemb: 42 },
+          radius: 12,
+          frameMs: 500,
+          scrubMs: 300,
+          jitter: { pos: 1.5, attn: 1.0 },
+          transitionFrac: { pos: 0.15, attn: 0.5 },
+          camera: { eye: { x: 1.5, y: 1.5, z: 1.2 } },
+        };
+
+        const $ = (id) => document.getElementById(id);
+        const el = {
+          plot: $("plot"),
+          slider: $("slider"),
+          sliderLabel: $("slider-label"),
+          context: $("context-label"),
+          playPause: $("play-pause"),
+          toggleAll: $("toggle-all"),
+          toggleEmb: $("toggle-emb"),
+          toggleUnemb: $("toggle-unemb"),
+        };
+
+        const tokens = ["[BOS]", ...CFG.doc.split(""), "[BOS]"];
+        const nSteps = Math.max(0, tokens.length - 1);
+        el.slider.max = Math.max(0, nSteps - 1);
+
+        const rand = (seed) => () => {
+          const x = Math.sin(seed++) * 10000;
+          return x - Math.floor(x);
+        };
+
+        const rEmb = rand(CFG.seeds.emb);
+        const rUnemb = rand(CFG.seeds.unemb);
+        const vocab = [
+          ...new Set(tokens.concat(["a", "e", "i", "o", "u", "t", "r", "s"])),
+        ];
+        const emb = {},
+          unemb = {};
+        let maxExtent = 0;
+
+        const track = (...vals) =>
+          vals.forEach((v) => {
+            maxExtent = Math.max(maxExtent, Math.abs(v));
+          });
+        const spherePoint = (r, prng) => {
+          const theta = prng() * 2 * Math.PI;
+          const phi = Math.acos(2 * prng() - 1);
+          return [
+            r * Math.sin(phi) * Math.cos(theta),
+            r * Math.sin(phi) * Math.sin(theta),
+            r * Math.cos(phi),
+          ];
+        };
+
+        const embXYZ = [[], [], []],
+          unembXYZ = [[], [], []];
+        for (const ch of vocab) {
+          const e = spherePoint(CFG.radius, rEmb);
+          const u = spherePoint(CFG.radius, rUnemb);
+          emb[ch] = e;
+          unemb[ch] = u;
+          track(...e, ...u);
+          embXYZ[0].push(e[0]);
+          embXYZ[1].push(e[1]);
+          embXYZ[2].push(e[2]);
+          unembXYZ[0].push(u[0]);
+          unembXYZ[1].push(u[1]);
+          unembXYZ[2].push(u[2]);
+        }
+
+        const mkTrace = (extra) => ({ type: "scatter3d", ...extra });
+        const bgTokenTrace = mkTrace({
+          x: embXYZ[0],
+          y: embXYZ[1],
+          z: embXYZ[2],
+          mode: "markers+text",
+          marker: { size: 3, color: "#facc15", opacity: 0.3 },
+          text: vocab,
+          textposition: "top center",
+          textfont: { size: 10, color: "#facc15" },
+          name: "Token Embeddings",
+          hoverinfo: "text",
+          showlegend: true,
+        });
+        const bgTargetTrace = mkTrace({
+          x: unembXYZ[0],
+          y: unembXYZ[1],
+          z: unembXYZ[2],
+          mode: "markers+text",
+          marker: { size: 3, color: "#c084fc", opacity: 0.6 },
+          text: vocab,
+          textposition: "top center",
+          textfont: { size: 12, color: "#c084fc" },
+          name: "Target Unembeddings",
+          hoverinfo: "text",
+          showlegend: true,
+        });
+
+        const clone = (o) => JSON.parse(JSON.stringify(o));
+        const frames = [];
+        let initialDynamic = null;
+
+        // Trace indices in each frame's data array (ghost anchor at 5 is never toggled)
+        const IDX = { emb: 0, unemb: 1, origin: 2, trajectory: 3, dest: 4 };
+
+        for (let pos = 0; pos < nSteps; pos++) {
+          const token = tokens[pos],
+            target = tokens[pos + 1];
+          const end = unemb[target].slice();
+          const cur = emb[token].slice();
+          const xs = [cur[0]],
+            ys = [cur[1]],
+            zs = [cur[2]];
+          const labels = [`Token Embedding: ${token}`];
+          const dx = end[0] - cur[0],
+            dy = end[1] - cur[1],
+            dz = end[2] - cur[2];
+
+          cur[0] +=
+            dx * CFG.transitionFrac.pos + (rEmb() - 0.5) * CFG.jitter.pos;
+          cur[1] +=
+            dy * CFG.transitionFrac.pos + (rEmb() - 0.5) * CFG.jitter.pos;
+          cur[2] +=
+            dz * CFG.transitionFrac.pos + (rEmb() - 0.5) * CFG.jitter.pos;
+          xs.push(cur[0]);
+          ys.push(cur[1]);
+          zs.push(cur[2]);
+          labels.push("+ Positional Embedding");
+
+          cur[0] +=
+            dx * CFG.transitionFrac.attn + (rUnemb() - 0.5) * CFG.jitter.attn;
+          cur[1] +=
+            dy * CFG.transitionFrac.attn + (rUnemb() - 0.5) * CFG.jitter.attn;
+          cur[2] +=
+            dz * CFG.transitionFrac.attn + (rUnemb() - 0.5) * CFG.jitter.attn;
+          xs.push(cur[0]);
+          ys.push(cur[1]);
+          zs.push(cur[2]);
+          labels.push("+ Attention Residual");
+
+          xs.push(end[0]);
+          ys.push(end[1]);
+          zs.push(end[2]);
+          labels.push("+ MLP Residual (Final State)");
+          track(...xs, ...ys, ...zs);
+
+          const dynamic = [
+            mkTrace({
+              x: [xs[0]],
+              y: [ys[0]],
+              z: [zs[0]],
+              mode: "markers",
+              marker: { size: 6, color: "#facc15", symbol: "square" },
+              text: [token],
+              textposition: "bottom center",
+              textfont: { size: 14, color: "#facc15" },
+              name: "Initial Token",
+              hoverinfo: "text",
+              hoverlabel: {
+                bgcolor: "#06b6d4",
+                bordercolor: "#0e7490",
+                font: { color: "#fff" },
+              },
+              showlegend: false,
+            }),
+            mkTrace({
+              x: xs,
+              y: ys,
+              z: zs,
+              mode: "lines+markers",
+              marker: { size: 4, color: "#06b6d4" },
+              line: { width: 3, color: "#38bdf8" },
+              text: labels,
+              name: "Trajectory",
+              hoverinfo: "text",
+              hoverlabel: {
+                bgcolor: "#06b6d4",
+                bordercolor: "#0e7490",
+                font: { color: "#fff" },
+              },
+              showlegend: false,
+            }),
+            mkTrace({
+              x: [xs[3]],
+              y: [ys[3]],
+              z: [zs[3]],
+              mode: "markers",
+              marker: { size: 8, color: "#c084fc", symbol: "diamond" },
+              text: [target],
+              textposition: "top center",
+              textfont: { size: 14, color: "#c084fc" },
+              name: "Final State",
+              hoverinfo: "text",
+              hoverlabel: {
+                bgcolor: "#06b6d4",
+                bordercolor: "#0e7490",
+                font: { color: "#fff" },
+              },
+              showlegend: false,
+            }),
+          ];
+
+          if (!initialDynamic) initialDynamic = dynamic.map(clone);
+          frames.push({
+            name: `t_${pos}`,
+            traces: [IDX.origin, IDX.trajectory, IDX.dest],
+            data: [
+              { x: [xs[0]], y: [ys[0]], z: [zs[0]], text: [token] },
+              { x: xs, y: ys, z: zs, text: labels },
+              { x: [xs[3]], y: [ys[3]], z: [zs[3]], text: [target] },
+            ],
+          });
+        }
+
+        const axisLimit = Math.ceil(maxExtent) + 1;
+
+        // Ghost trace: invisible corner points that pin the scene range permanently
+        const ghostTrace = mkTrace({
+          x: [
+            -axisLimit,
+            axisLimit,
+            -axisLimit,
+            axisLimit,
+            -axisLimit,
+            axisLimit,
+            -axisLimit,
+            axisLimit,
+          ],
+          y: [
+            -axisLimit,
+            -axisLimit,
+            axisLimit,
+            axisLimit,
+            -axisLimit,
+            -axisLimit,
+            axisLimit,
+            axisLimit,
+          ],
+          z: [
+            -axisLimit,
+            -axisLimit,
+            -axisLimit,
+            -axisLimit,
+            axisLimit,
+            axisLimit,
+            axisLimit,
+            axisLimit,
+          ],
+          mode: "markers",
+          marker: { size: 0.001, color: "rgba(0,0,0,0)", opacity: 0 },
+          hoverinfo: "none",
+          showlegend: false,
+          name: "_anchor",
+        });
+
+        const layout = {
+          paper_bgcolor: "#0f172a",
+          scene: {
+            aspectmode: "cube",
+            bgcolor: "#0f172a",
+            xaxis: {
+              title: "X",
+              range: [-axisLimit, axisLimit],
+              autorange: false,
+              backgroundcolor: "#1e293b",
+              gridcolor: "#334155",
+              showbackground: true,
+              zerolinecolor: "#475569",
+            },
+            yaxis: {
+              title: "Y",
+              range: [-axisLimit, axisLimit],
+              autorange: false,
+              backgroundcolor: "#1e293b",
+              gridcolor: "#334155",
+              showbackground: true,
+              zerolinecolor: "#475569",
+            },
+            zaxis: {
+              title: "Z",
+              range: [-axisLimit, axisLimit],
+              autorange: false,
+              backgroundcolor: "#1e293b",
+              gridcolor: "#334155",
+              showbackground: true,
+              zerolinecolor: "#475569",
+            },
+            camera: CFG.camera,
+          },
+          showlegend: true,
+          legend: {
+            x: 0.02,
+            y: 0.22,
+            xanchor: "left",
+            yanchor: "top",
+            font: { color: "#e2e8f0", size: 14 },
+            bgcolor: "rgba(15, 23, 42, 0.7)",
+            bordercolor: "#334155",
+            borderwidth: 1,
+            itemclick: false,
+            itemdoubleclick: false,
+            itemsizing: "constant",
+          },
+          margin: { l: 0, r: 0, b: 0, t: 0 },
+        };
+
+        const initialData = [
+          clone(bgTokenTrace),
+          clone(bgTargetTrace),
+          ...(initialDynamic || []),
+          clone(ghostTrace),
+        ];
+
+        const clampStep = (n) =>
+          Math.max(0, Math.min(nSteps - 1, Number.isFinite(n) ? n : 0));
+        const setPlaying = (on) => {
+          el.playPause.textContent = on ? "Pause" : "Play";
+          el.playPause.classList.toggle("bg-sky-600", !on);
+          el.playPause.classList.toggle("hover:bg-sky-500", !on);
+          el.playPause.classList.toggle("border-sky-700", !on);
+          el.playPause.classList.toggle("bg-slate-700", on);
+          el.playPause.classList.toggle("hover:bg-slate-600", on);
+          el.playPause.classList.toggle("border-slate-600", on);
+        };
+
+        function updateUI(pos) {
+          if (!nSteps) return;
+          const i = clampStep(pos);
+          const token = tokens[i],
+            target = tokens[i + 1];
+          el.slider.value = i;
+          el.sliderLabel.innerHTML = `Step: ${i}<br><span class="text-slate-300">(${token} &rarr; ${target})</span>`;
+          el.context.innerHTML = `Context: "${tokens.slice(1, i + 1).join("")}" &rarr; Predicting: "${target}"`;
+        }
+
+        function animateTo(frameNames, frameDuration) {
+          return Plotly.animate(el.plot, frameNames, {
+            mode: "immediate",
+            fromcurrent: frameNames == null,
+            transition: { duration: 0 },
+            frame: { duration: frameDuration, redraw: true },
+          }).catch(() => {});
+        }
+
+        async function init() {
+          try {
+            await Plotly.newPlot(el.plot, initialData, layout, {
+              responsive: true,
+            });
+            if (frames.length) await Plotly.addFrames(el.plot, frames);
+
+            let playing = false;
+            el.playPause.addEventListener("click", () => {
+              if (!frames.length) return;
+              playing = !playing;
+              setPlaying(playing);
+              if (playing) {
+                animateTo(null, CFG.frameMs);
+              } else {
+                Plotly.animate(el.plot, [], {
+                  mode: "immediate",
+                  transition: { duration: 0 },
+                  frame: { duration: 0, redraw: false },
+                }).catch(() => {});
+              }
+            });
+
+            el.slider.addEventListener("input", (e) => {
+              if (!frames.length) return;
+              const pos = clampStep(parseInt(e.target.value, 10));
+              playing = false;
+              setPlaying(false);
+              updateUI(pos);
+              animateTo([`t_${pos}`], CFG.scrubMs);
+            });
+
+            el.plot.on("plotly_animatingframe", (e) => {
+              const pos = clampStep(
+                parseInt(String(e.name || "").split("_")[1], 10),
+              );
+              updateUI(pos);
+              if (pos === nSteps - 1) {
+                playing = false;
+                setPlaying(false);
+              }
+            });
+
+            const visState = { all: true, emb: true, unemb: true };
+
+            function updateOriginDestText() {
+              const originMode =
+                visState.all && !visState.emb ? "markers+text" : "markers";
+              const destMode =
+                visState.all && !visState.unemb ? "markers+text" : "markers";
+              Plotly.restyle(el.plot, { mode: originMode }, [IDX.origin]).catch(
+                () => {},
+              );
+              Plotly.restyle(el.plot, { mode: destMode }, [IDX.dest]).catch(
+                () => {},
+              );
+            }
+
+            const makeLayerToggle = (
+              btn,
+              indices,
+              key,
+              hideLabel,
+              showLabel,
+            ) => {
+              btn.addEventListener("click", () => {
+                visState[key] = !visState[key];
+                const visible = visState[key];
+                Plotly.restyle(el.plot, { visible }, indices).catch(() => {});
+                btn.textContent = visible ? hideLabel : showLabel;
+                btn.classList.toggle("opacity-40", !visible);
+                updateOriginDestText();
+              });
+            };
+
+            makeLayerToggle(
+              el.toggleAll,
+              [IDX.origin, IDX.trajectory, IDX.dest],
+              "all",
+              "Hide Vectors",
+              "Show Vectors",
+            );
+            makeLayerToggle(
+              el.toggleEmb,
+              [IDX.emb],
+              "emb",
+              "Hide Token Embeddings",
+              "Show Token Embeddings",
+            );
+            makeLayerToggle(
+              el.toggleUnemb,
+              [IDX.unemb],
+              "unemb",
+              "Hide Target Unembeddings",
+              "Show Target Unembeddings",
+            );
+
+            playing = false;
+            setPlaying(false);
+            updateUI(0);
+          } catch (err) {
+            console.error("Plotly initialization error:", err);
+            playing = false;
+            setPlaying(false);
+          }
+        }
+
+        init();
+      })();
+    </script>
+  </body>
+</html>
