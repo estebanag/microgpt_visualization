@@ -70,12 +70,6 @@
           Play
         </button>
         <button
-          id="toggle-all"
-          class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-1.5 rounded border border-slate-600 font-semibold text-sm transition-colors w-full"
-        >
-          Hide Vectors
-        </button>
-        <button
           id="toggle-emb"
           class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-1.5 rounded border border-slate-600 font-semibold text-sm transition-colors w-full"
         >
@@ -86,6 +80,18 @@
           class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-1.5 rounded border border-slate-600 font-semibold text-sm transition-colors w-full"
         >
           Hide Target Unembeddings
+        </button>
+        <button
+          id="toggle-all"
+          class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-1.5 rounded border border-slate-600 font-semibold text-sm transition-colors w-full"
+        >
+          Hide Vectors
+        </button>
+        <button
+          id="toggle-attn-hl"
+          class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-1.5 rounded border border-slate-600 font-semibold text-sm transition-colors w-full"
+        >
+          Highlight Attention Adjustment
         </button>
       </div>
     </div>
@@ -115,6 +121,7 @@
           toggleAll: $("toggle-all"),
           toggleEmb: $("toggle-emb"),
           toggleUnemb: $("toggle-unemb"),
+          toggleAttnHl: $("toggle-attn-hl"),
         };
 
         const tokens = ["[BOS]", ...CFG.doc.split(""), "[BOS]"];
@@ -177,14 +184,26 @@
           textfont: { size: 10, color: "#facc15" },
           name: "Token Embeddings",
           hoverinfo: "text",
+          showlegend: false,
+        });
+        const legendTokenTrace = mkTrace({
+          x: [embXYZ[0][0]],
+          y: [embXYZ[1][0]],
+          z: [embXYZ[2][0]],
+          mode: "markers",
+          marker: { size: 3, color: "#facc15", opacity: 0.3 },
+          name: "Token Embeddings",
+          hoverinfo: "skip",
           showlegend: true,
+          visible: "legendonly",
+          legendrank: -1,
         });
         const bgTargetTrace = mkTrace({
           x: unembXYZ[0],
           y: unembXYZ[1],
           z: unembXYZ[2],
           mode: "markers+text",
-          marker: { size: 3, color: "#c084fc", opacity: 0.6 },
+          marker: { size: 3, color: "#c084fc", opacity: 0.3 },
           text: vocab,
           textposition: "top center",
           textfont: { size: 12, color: "#c084fc" },
@@ -197,8 +216,37 @@
         const frames = [];
         let initialDynamic = null;
 
-        // Trace indices in each frame's data array (ghost anchor at 5 is never toggled)
-        const IDX = { emb: 0, unemb: 1, origin: 2, trajectory: 3, dest: 4 };
+        const attnHighlightTrace = mkTrace({
+          x: [0, 0],
+          y: [0, 0],
+          z: [0, 0],
+          mode: "lines",
+          marker: { size: 8, color: "#f97316" },
+          line: { width: 3, color: "#f97316" },
+          text: ["+ Positional Embedding", "+ Attention Residual"],
+          name: "Attention Adjustment",
+          hoverinfo: "text",
+          hoverlabel: {
+            bgcolor: "#ea580c",
+            bordercolor: "#c2410c",
+            font: { color: "#fff" },
+          },
+          visible: false,
+          showlegend: false,
+        });
+
+        // Trace indices in the plot data array (ghost anchor at 7 is never toggled)
+        const IDX = {
+          emb: 0,
+          unemb: 1,
+          origin: 2,
+          trajectory: 3,
+          dest: 4,
+          destDot: 5,
+          attnHL: 6,
+          legendToken: 8,
+        };
+        const stepTrajectories = [];
 
         for (let pos = 0; pos < nSteps; pos++) {
           const token = tokens[pos],
@@ -282,7 +330,7 @@
               y: [ys[3]],
               z: [zs[3]],
               mode: "markers",
-              marker: { size: 8, color: "#c084fc", symbol: "diamond" },
+              marker: { size: 6, color: "#c084fc", symbol: "diamond" },
               text: [target],
               textposition: "top center",
               textfont: { size: 14, color: "#c084fc" },
@@ -295,16 +343,34 @@
               },
               showlegend: false,
             }),
+            mkTrace({
+              x: [xs[3]],
+              y: [ys[3]],
+              z: [zs[3]],
+              mode: "markers",
+              marker: { size: 4, color: "#06b6d4", symbol: "circle" },
+              text: [target],
+              hoverinfo: "skip",
+              showlegend: false,
+            }),
           ];
 
           if (!initialDynamic) initialDynamic = dynamic.map(clone);
+
+          stepTrajectories.push({
+            xs: xs.slice(),
+            ys: ys.slice(),
+            zs: zs.slice(),
+          });
+
           frames.push({
             name: `t_${pos}`,
-            traces: [IDX.origin, IDX.trajectory, IDX.dest],
+            traces: [IDX.origin, IDX.trajectory, IDX.dest, IDX.destDot],
             data: [
               { x: [xs[0]], y: [ys[0]], z: [zs[0]], text: [token] },
               { x: xs, y: ys, z: zs, text: labels },
               { x: [xs[3]], y: [ys[3]], z: [zs[3]], text: [target] },
+              { x: [xs[3]], y: [ys[3]], z: [zs[3]] },
             ],
           });
         }
@@ -405,7 +471,9 @@
           clone(bgTokenTrace),
           clone(bgTargetTrace),
           ...(initialDynamic || []),
+          clone(attnHighlightTrace),
           clone(ghostTrace),
+          clone(legendTokenTrace),
         ];
 
         const clampStep = (n) =>
@@ -447,6 +515,62 @@
             if (frames.length) await Plotly.addFrames(el.plot, frames);
 
             let playing = false;
+            let currentStep = 0;
+            let highlightAttn = false;
+
+            function updateHighlights(pos) {
+              if (!highlightAttn) return;
+              const predictedSet = new Set(tokens.slice(1, pos + 1));
+              const colors = vocab.map((ch) =>
+                predictedSet.has(ch)
+                  ? "rgba(249,115,22,1)"
+                  : "rgba(250,204,21,0.3)",
+              );
+              const sizes = vocab.map((ch) => (predictedSet.has(ch) ? 8 : 3));
+              const lineWidths = vocab.map((ch) =>
+                predictedSet.has(ch) ? 0 : 0,
+              );
+              Plotly.restyle(
+                el.plot,
+                {
+                  "marker.color": [colors],
+                  "marker.opacity": 1,
+                  "marker.size": [sizes],
+                  "marker.line.width": [lineWidths],
+                },
+                [IDX.emb],
+              ).catch(() => {});
+              if (pos < stepTrajectories.length) {
+                const t = stepTrajectories[pos];
+                Plotly.restyle(
+                  el.plot,
+                  {
+                    x: [[t.xs[1], t.xs[2]]],
+                    y: [[t.ys[1], t.ys[2]]],
+                    z: [[t.zs[1], t.zs[2]]],
+                    visible: true,
+                  },
+                  [IDX.attnHL],
+                ).catch(() => {});
+              }
+            }
+
+            function resetHighlights() {
+              Plotly.restyle(
+                el.plot,
+                {
+                  "marker.color": "#facc15",
+                  "marker.opacity": 0.3,
+                  "marker.size": 3,
+                  "marker.line.width": 0,
+                },
+                [IDX.emb],
+              ).catch(() => {});
+              Plotly.restyle(el.plot, { visible: false }, [IDX.attnHL]).catch(
+                () => {},
+              );
+            }
+
             el.playPause.addEventListener("click", () => {
               if (!frames.length) return;
               playing = !playing;
@@ -465,9 +589,11 @@
             el.slider.addEventListener("input", (e) => {
               if (!frames.length) return;
               const pos = clampStep(parseInt(e.target.value, 10));
+              currentStep = pos;
               playing = false;
               setPlaying(false);
               updateUI(pos);
+              updateHighlights(pos);
               animateTo([`t_${pos}`], CFG.scrubMs);
             });
 
@@ -475,7 +601,9 @@
               const pos = clampStep(
                 parseInt(String(e.name || "").split("_")[1], 10),
               );
+              currentStep = pos;
               updateUI(pos);
+              updateHighlights(pos);
               if (pos === nSteps - 1) {
                 playing = false;
                 setPlaying(false);
@@ -516,14 +644,35 @@
 
             makeLayerToggle(
               el.toggleAll,
-              [IDX.origin, IDX.trajectory, IDX.dest],
+              [IDX.origin, IDX.trajectory, IDX.dest, IDX.destDot],
               "all",
               "Hide Vectors",
               "Show Vectors",
             );
+            // After the generic toggle fires, sync the Highlight button visibility
+            el.toggleAll.addEventListener("click", () => {
+              const vectorsVisible = visState.all;
+              el.toggleAttnHl.classList.toggle("opacity-40", !vectorsVisible);
+              el.toggleAttnHl.disabled = !vectorsVisible;
+              if (!vectorsVisible && highlightAttn) {
+                highlightAttn = false;
+                el.toggleAttnHl.textContent = "Highlight Attention Adjustment";
+                el.toggleAttnHl.classList.remove(
+                  "bg-orange-700",
+                  "hover:bg-orange-600",
+                  "border-orange-600",
+                );
+                el.toggleAttnHl.classList.add(
+                  "bg-slate-700",
+                  "hover:bg-slate-600",
+                  "border-slate-600",
+                );
+                resetHighlights();
+              }
+            });
             makeLayerToggle(
               el.toggleEmb,
-              [IDX.emb],
+              [IDX.emb, IDX.legendToken],
               "emb",
               "Hide Token Embeddings",
               "Show Token Embeddings",
@@ -535,6 +684,36 @@
               "Hide Target Unembeddings",
               "Show Target Unembeddings",
             );
+
+            el.toggleAttnHl.addEventListener("click", () => {
+              highlightAttn = !highlightAttn;
+              el.toggleAttnHl.textContent = highlightAttn
+                ? "Unhighlight Attention Adjustment"
+                : "Highlight Attention Adjustment";
+              el.toggleAttnHl.classList.toggle("bg-orange-700", highlightAttn);
+              el.toggleAttnHl.classList.toggle(
+                "hover:bg-orange-600",
+                highlightAttn,
+              );
+              el.toggleAttnHl.classList.toggle(
+                "border-orange-600",
+                highlightAttn,
+              );
+              el.toggleAttnHl.classList.toggle("bg-slate-700", !highlightAttn);
+              el.toggleAttnHl.classList.toggle(
+                "hover:bg-slate-600",
+                !highlightAttn,
+              );
+              el.toggleAttnHl.classList.toggle(
+                "border-slate-600",
+                !highlightAttn,
+              );
+              if (highlightAttn) {
+                updateHighlights(currentStep);
+              } else {
+                resetHighlights();
+              }
+            });
 
             playing = false;
             setPlaying(false);
